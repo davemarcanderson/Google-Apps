@@ -1,0 +1,164 @@
+---
+title: "Google Apps Report"
+author: "Dave Anderson"
+date: "December 17, 2018"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning = FALSE,message = FALSE)
+
+library(tidyverse)
+library(lubridate)
+library(kableExtra)
+library(benford.analysis)
+library(tidytext)
+library("tm")
+library("SnowballC")
+library("wordcloud")
+library("RColorBrewer")
+
+```
+
+#Abstract
+This report outlines a study analyzing Google Play apps data. The goals of the study were to understand the apps themselves from multiple perspectives, then to search for apps with potentially false reviews. To search for apps with false reviews, I utilized Benford's law, assuming the digits of the reviews should have a natural distribution. The results were that at different levels of apps, there were some differences from Benford's Law, but there was not enough accurate and precise data to confidently place apps on a suspect list. Overall, the shape of the distribution is pretty close to Benford's. 
+
+#Introduction
+  According to Business of Apps, there were about 50 billion app downloads in 2015.[1] That may sound like a lot, but what if I told you there were 90 billion downloads just one year later? The technology world continues to grow and change dramatically. Shopping has become dominated by online orders, with Amazon becoming the most popular app for millenials. Games are the most popular app category, with people like my mother experiencing their first taste of video games through Angry Birds and Candy Crush. Our society has even turned to our phones for dating. With new ideas constantly sprouting, and many parts of the world just beginning to access the mobile world, the app industry is only going to continue to grow. As the competition to become the next big app grows, more developers are supposedly willing to fabricate downloads/reviews in order to attempt to grow their brand. In this report, I indulge my curiosity by first exploring the apps and reviews from the Google Play Store as a whole. What types of apps are successful? What types of apps have the best reviews? What are people concerned about in their reviews? After my exploration, I will investigate apps with potentially fabricated reviews using Benford's law. 
+
+
+#Methods
+##Data
+```{r}
+google <- read_csv('googleplaystore.csv')
+reviews <- read_csv('googleplaystore_user_reviews.csv')
+google <- google %>% filter(Reviews != 'NA') %>% filter(Type != 'NaN')
+google$Type <- as.factor(google$Type)
+google <- google %>%
+  mutate(
+    Installs = gsub("\\+", "", as.character(Installs)),
+    Installs = as.numeric(gsub(",", "", Installs)),
+    Size = gsub("M", "", Size),
+    Size = ifelse(grepl("k", Size), 0, as.numeric(Size)),
+    Reviews = as.numeric(Reviews),
+    Price = as.numeric(gsub("\\$", "", as.character(Price))))
+
+single_apps <- google[!duplicated(google$App), ]
+
+write_csv(single_apps,"non-repeat-apps.csv")
+```
+I accessed the Google Playstore Apps data on Kaggle.[2] The data was scrapped from the app store itself, and includes about 10,000 apps. I am not sure how the 10,000 were chosen, as there are over two million apps available.[3] The data includes the app name, size, rating, number of reviews, category, price, category for approximate installs, and update information. There is also a data set with individual reviews for the apps. Unfortunately, the reviews data set only contains apps that begin with A-H or a number. 
+
+
+##EDA
+  I began by analyzing the number of reviews, as this metric will be used to look for fraudulent reviews. The following plot is a histogram of the number of reviews for each app. It may be the most interesting/boring plot of all time. Almost all of the apps have virtually no reviews, while a few apps have an extremely large number. The maximum number of reviews is 78,158,306. There are clearly tons of apps made for a specific, small audience and/or tons of apps fighting to break through and become famous. The billions of downloads referenced earlier are dominated by a very small portion of the market. In fact, 595 apps have 0 reviews. 
+```{r}
+ggplot(google,aes(Reviews/1000000))+geom_histogram()+labs(title = 'Histogram of Number of App Reviews', x = "Number of Reviews (in Millions)", y = "Number of Apps")
+
+highreviews <- single_apps %>% arrange(desc(Reviews))
+
+kable(highreviews[1:5,c(1:4,6)],caption = "Top Five Reviewed Apps") %>% kable_styling(bootstrap_options = 'striped')
+
+
+```
+
+###Categories
+  The following plots examine the 33 different app categories. We can see that in terms of apps themselves, 'Family', 'Games' and 'Tools' are the categories with the most apps. The large majority of apps are free, which makes sense since most successful apps can earn money with advertising or charging for certain features. In terms of installs and reviews, neither 'Family' or 'Tools' remain in the top three. Games and social lives clearly dominate what the general population uses their phones for. 
+  
+```{r, fig.height=4}
+
+
+categories <- google %>% filter(Rating != 'NaN') %>% group_by(Category) %>% summarise(Number = n(),'Average Rating' = round(mean(Rating),2),'Average Reviews' = round(mean(Reviews),2),Total = sum(Reviews),Percent = (n()/10839)*100,Installs = sum(Installs))
+
+
+
+ggplot(google)+
+  geom_bar(aes(Category, fill = Type))+
+  theme(axis.text.x = element_text(angle = 75, hjust = 1))+
+  labs(title = "Number of Apps by Category", x = "Category", y = "Number of Apps")
+
+
+colored <- ifelse(categories$Total > 500000000, "red", "black")
+ggplot(categories)+
+  geom_col(aes(Category,Total/1000000,fill=ifelse(Total > 500000000,"A", "B")))+
+  scale_fill_manual(guide=FALSE, values=c("red", "black"))+
+  theme(axis.text.x = element_text(color = colored, angle = 75, hjust = 1))+
+  labs(title = "Total Reviews by Category", x = "App Category", y = "Total Reviews")
+
+
+colored2 <- ifelse(categories$Installs > 5000000000, "red", "black")
+ggplot(categories)+
+  geom_col(aes(Category,Installs/1000000,fill=ifelse(Installs > 5000000000,"A", "B")))+
+  scale_fill_manual(guide=FALSE, values=c("red", "black"))+
+  theme(axis.text.x = element_text(color = colored2,angle = 75, hjust = 1))+
+  labs(title = "Total Installs by Category", y = "Total Installs", x = "Category")
+
+
+```
+
+
+###Ratings
+  The majority of apps have high ratings. In fact, the average rating for each category does not change by much (Dating:3.97 to Events:4.44). These categories tend to make sense, as "dating" most likely includes apps that do not fulfill their promises, while "events" is a small category with specific purposes. "Education" and "Arts and Design" are also highly rated. The highest rated app with at least 1,000 reviews is "JW Library" with a 4.9 rating. The highest rated game is a solitaire game. 
+```{r, fig.height=4}
+ggplot(single_apps,aes(Rating))+geom_density(color = 'black',fill = 'coral')+
+  labs(title = "Distribution of App Ratings",x = "Rating", y = "Density")
+
+
+
+ggplot(single_apps)+geom_boxplot(aes(Category,Rating))+theme(axis.text.x = element_text(angle = 75, hjust = 1))
+```
+
+
+
+
+##Text Analysis
+  I had hoped to have reviews for all the apps included in the study in order to analyze the reviews' contents by category, and potentially use the review content to investigate false reviews. Unfortunately, it may be difficult to determine how accurate any text analysis conclusions may be with the limited data. I started by creating a word cloud for all of the reviews available. This confirms our previous observations that games are highly rated apps. We also see that many people are concerned with difficulty, cost, ads and updates/quality of the apps. 
+```{r}
+words <- reviews %>% unnest_tokens(word, Translated_Review)
+words <- words %>% anti_join(stop_words) %>% filter(word != 'nan')
+d <- words %>% count(word, sort = TRUE)
+
+wordcloud(words = d$word, freq = d$n, min.freq = 1,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+
+
+
+```
+##Benford
+  I chose to do a benford analysis on the number of reviews. I will be comparing the distribution of the leading two digits of reviews to benford's law distribution. If reviews are faked for some apps, we could potentially see peaks in the distribution of leading digits to further investigate. I chose to analyze the apps with greater than ten reviews. Partly because I wish to analyze the first two digits, but also because there are a very large number of apps with under ten reviews, and these apps are obviously not generating their own reviews. 
+  
+#Results
+  After removing apps with less than 10 reviews, the data actually fits very well with Benford's Law. I chose to investigate further by creating a list of suspect apps, according to the Benford Analysis Package. The average ratio of installs/reviews is 118. The following table shows some apps with a relatively large number of reviews (>20,000) and a ratio that is far less than average. This may indicate apps that are falsely creating reviews. Because of the lack of precision with number of installs and seemingly randomness of the suspect Benford numbers, these apps are probably on this short list by coincidence. Apps may also be able to generate false installs as well, but the installs to reviews ratio may be a good place to investigate in future studies. 
+```{r}
+google_ben <- google %>% filter(Reviews > 10) %>% mutate(ratio = round(Installs/Reviews,2))
+
+ben1 <- benford(google_ben$Reviews)
+plot(ben1)
+
+
+suspects <- getSuspects(ben1,google_ben)
+
+sus_table <- suspects %>% filter(Reviews > 20000) %>% arrange(ratio) 
+sus_table[c(1:4,7),c(1:4,6)] %>% kable(caption = "Potentially Suspect Apps") %>% kable_styling(bootstrap_options = 'striped')
+
+
+```
+  If apps were fabricating reviews, then the app would most likely have a large number of reviews. I decided to re-run benford analysis on apps with over 100,000 reviews, analyzing the first three digits. Both two and three digits do not fit the distribution as well as the previous analysis. This is understandable since we cut our number of apps from 9,000 to about 2,000. We also know that there are almost certain thresholds that apps belong to. Looking at only apps with over 100,000 reviews, we would expect to see a number of apps right around the 100,000 mark. I ran the analysis a few times, creating a group of "large apps" in a variety of ways, and it was always difficult to determine what apps may be suspicious. The lack of precision of the installs makes understanding individual apps too difficult.   
+```{r}
+google_ben2 <- google %>% filter(Reviews > 100000) %>% mutate(ratio = round(Installs/Reviews,2))
+ben2 <- benford(google_ben2$Reviews,number.of.digits = 3)
+plot(ben2)
+suspects2 <- getSuspects(ben2,google_ben2)
+```
+  
+  
+#Discussion
+  The android app world is clearly dominated by games, messaging and social media. Furthermore, the app world is dominated by a select few of these apps. There are many, many apps that exist with very little success. There tend to be more games that reach a significant level of popularity, as those fads change easier than social media platforms. I would guess that the ratio of free to paid apps has not always been this drastic. Apps have grown in their capabilities to make money on advertising and paid extras. 
+  In the competitive world of apps, it is logical to assume developers would create fake reviews and installs to show their app as more popular than it is. “While we haven’t performed any specific analysis to quantify the scale of the problem, fake reviews do exist and have been shown to materially affect app review scores,” Paul Barnes, regional director at App Annie.[4] With the overall positive ratings of apps, maybe this is a bigger problem than we think. I choose to believe society is more generally positive. Benford Analysis seems like an effective way to discover suspicious apps. The Digital Trends article talks about apps buying reviews in batches. Maybe apps purchase similar packages of reviews, creating unnatural patterns in the reviews digits. But in order to fully investigate the problem, I would need to know the exact number of installs and have reviews for all apps. 
+
+#References
+[1] http://www.businessofapps.com/data/app-statistics/
+[2] https://www.kaggle.com/lava18/google-play-store-apps
+[3] https://www.statista.com/statistics/276623/number-of-apps-available-in-leading-app-stores/
+[4] https://www.digitaltrends.com/android/can-you-really-trust-app-store-ratings/
